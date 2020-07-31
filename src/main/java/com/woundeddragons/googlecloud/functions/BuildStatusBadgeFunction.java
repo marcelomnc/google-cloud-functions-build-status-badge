@@ -18,18 +18,25 @@ public class BuildStatusBadgeFunction implements BackgroundFunction<PubSubMessag
     @Override
     public void accept(PubSubMessageDTO pubSubMessageDTO, Context context) throws RuntimeException {
         if (pubSubMessageDTO != null && pubSubMessageDTO.getData() != null) {
-            String repoNameToWatch = Optional.ofNullable(System.getenv("REPO_NAME"))
-                    .orElseThrow(() -> new RuntimeException("Environment variable 'REPO_NAME' must be set for this function."));
             //By default we will watch for builds on 'master' branches
-            String branchNameToWatch = Optional.ofNullable(System.getenv("BRANCH_NAME")).orElse("master");
-            //By default we will use 'build-status-badges' as google cloud storage bucket name
-            String storageBucketName = Optional.ofNullable(System.getenv("BUCKET_NAME")).orElse("build-status-badges");
+            String defaultBranchNameRegexToWatch = "^master$";
+            //By default we will use 'build-status-badges' as the google cloud storage bucket name
+            String defaultStorageBucketName = "build-status-badges";
             //By default we will use 'last-build-status-badge.svg' as the name for the badge image of the last build status
-            String lastBuildStatusBadgeName = Optional.ofNullable(System.getenv("BADGE_NAME")).orElse("last-build-status-badge");
+            String defaultLastBuildStatusBadgeName = "last-build-status-badge";
+
+            String repoNameRegexToWatch = Optional.ofNullable(System.getenv("REPO_NAME_REGEX"))
+                    .orElseThrow(() -> new RuntimeException("Environment variable 'REPO_NAME_REGEX' must be set for this function."));
+            String branchNameRegexToWatch = Optional.ofNullable(System.getenv("BRANCH_NAME_REGEX")).orElse(defaultBranchNameRegexToWatch);
+            Optional<String> tagNameRegexToWatch = Optional.ofNullable(System.getenv("TAG_NAME_REGEX"));
+            String storageBucketName = Optional.ofNullable(System.getenv("BUCKET_NAME")).orElse(defaultStorageBucketName);
+            String lastBuildStatusBadgeName = Optional.ofNullable(System.getenv("BADGE_NAME")).orElse(defaultLastBuildStatusBadgeName);
             String targetFileName = lastBuildStatusBadgeName + ".svg";
 
-            logger.info("Repository name to watch for builds: '" + repoNameToWatch + "'");
-            logger.info("Branch name to watch for builds: '" + branchNameToWatch + "'");
+            String valueNotSet = "[Value Not Set]";
+            logger.info("Repository name regex to watch for builds: '" + repoNameRegexToWatch + "'");
+            logger.info("Branch name regex to watch for builds: '" + branchNameRegexToWatch + "'");
+            logger.info("Tag name regex to watch for builds: '" + tagNameRegexToWatch.orElse(valueNotSet) + "'");
             logger.info("Storage bucket name to use: '" + storageBucketName + "'");
             logger.info("Last build status badge name to use: '" + targetFileName + "'");
 
@@ -38,14 +45,30 @@ public class BuildStatusBadgeFunction implements BackgroundFunction<PubSubMessag
             JsonObject messageDataJsonObject = JsonParser.parseString(decodedData).getAsJsonObject();
             String receivedBuildStatus = messageDataJsonObject.get("status").getAsString();
             JsonObject substitutionsJsonObject = messageDataJsonObject.get("substitutions").getAsJsonObject();
-            String receivedRepoName = substitutionsJsonObject.get("REPO_NAME").getAsString();
-            String receivedBranchName = substitutionsJsonObject.get("BRANCH_NAME").getAsString();
-            logger.info("Received repository name: '" + receivedRepoName + "'");
-            logger.info("Received branch name: '" + receivedBranchName + "'");
+            Optional<String> receivedRepoName = Optional.ofNullable(substitutionsJsonObject.get("REPO_NAME") != null ? substitutionsJsonObject.get("REPO_NAME").getAsString() : null);
+            //BRANCH_NAME is not received when the build is triggered by pushing a tag to the repo
+            Optional<String> receivedBranchName = Optional.ofNullable(substitutionsJsonObject.get("BRANCH_NAME") != null ? substitutionsJsonObject.get("BRANCH_NAME").getAsString() : null);
+            //TAG_NAME is not received when the build is triggered by pushing to a branch
+            Optional<String> receivedTagName = Optional.ofNullable(substitutionsJsonObject.get("TAG_NAME") != null ? substitutionsJsonObject.get("TAG_NAME").getAsString() : null);
+
+            logger.info("Received repository name: '" + receivedRepoName.orElse(valueNotSet) + "'");
+            logger.info("Received branch name: '" + receivedBranchName.orElse(valueNotSet) + "'");
+            logger.info("Received tag name: '" + receivedTagName.orElse(valueNotSet) + "'");
             logger.info("Received build status: '" + receivedBuildStatus + "'");
 
-            if (repoNameToWatch.equals(receivedRepoName)
-                    && branchNameToWatch.equals(receivedBranchName)) {
+            boolean doBuildBadgeProcess = false;
+            if (receivedRepoName.isPresent() && receivedRepoName.get().matches(repoNameRegexToWatch)) {
+                //if TAG_NAME_REGEX is set, it has precedence over the BRANCH_NAME_REGEX check
+                if (tagNameRegexToWatch.isPresent()) {
+                    if (receivedTagName.isPresent() && receivedTagName.get().matches(tagNameRegexToWatch.get())) {
+                        doBuildBadgeProcess = true;
+                    }
+                } else if (receivedBranchName.isPresent() && receivedBranchName.get().matches(branchNameRegexToWatch)) {
+                    doBuildBadgeProcess = true;
+                }
+            }
+
+            if (doBuildBadgeProcess) {
                 logger.info("Building badge ...");
                 //Specify no-cache to avoid stale build status badges
                 String cacheControlMetadataToSet = "no-cache, max-age=0";
